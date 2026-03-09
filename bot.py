@@ -9,7 +9,7 @@ import yt_dlp
 # =========================
 # CONFIG
 # =========================
-TOKEN = "PUT_YOUR_BOT_TOKEN_HERMTQ4MDU1NTExOTA1MjU5MTE3NA.G1IPiz.kZpMc9rxrSST8Qg63NhevOQZJyzWktL3ux24bsE"
+TOKEN = os.getenv("TOKEN")
 PREFIX = "!"
 
 intents = discord.Intents.default()
