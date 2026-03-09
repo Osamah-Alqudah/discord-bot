@@ -23,19 +23,21 @@ bot = commands.Bot(command_prefix=PREFIX, intents=intents)
 ytdl_format_options = {
     "format": "bestaudio/best",
     "noplaylist": True,
-    "quiet": True,
-    "default_search": "ytsearch",
+    "quiet": False,
+    "default_search": "ytsearch1",
     "source_address": "0.0.0.0",
+    "extract_flat": False,
 }
 
 ffmpeg_options = {
-    "options": "-vn"
+    "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
+    "options": "-vn",
 }
 
 ytdl = yt_dlp.YoutubeDL(ytdl_format_options)
 
 # Queue per guild
-music_queues = {}   # {guild_id: deque([song, song, ...])}
+music_queues = {}  # {guild_id: deque([song, song, ...])}
 
 
 class YTDLSource(discord.PCMVolumeTransformer):
@@ -49,16 +51,28 @@ class YTDLSource(discord.PCMVolumeTransformer):
     async def from_url(cls, url, *, loop=None, stream=True):
         loop = loop or asyncio.get_event_loop()
 
-        data = await loop.run_in_executor(
-            None,
-            lambda: ytdl.extract_info(url, download=not stream)
-        )
+        def extract():
+            return ytdl.extract_info(url, download=not stream)
+
+        data = await loop.run_in_executor(None, extract)
+
+        if data is None:
+            raise Exception("yt-dlp returned no data")
 
         if "entries" in data:
-            data = data["entries"][0]
+            entries = data.get("entries")
+            if not entries:
+                raise Exception("No search results found")
+            data = entries[0]
 
-        filename = data["url"] if stream else ytdl.prepare_filename(data)
-        source = discord.FFmpegPCMAudio(filename, **ffmpeg_options)
+        audio_url = data.get("url")
+        if not audio_url:
+            raise Exception("No audio URL found in extracted data")
+
+        print("Extracted title:", data.get("title"))
+        print("Audio URL found:", bool(audio_url))
+
+        source = discord.FFmpegPCMAudio(audio_url, **ffmpeg_options)
         return cls(source, data=data)
 
 
@@ -76,20 +90,30 @@ async def play_next(ctx):
         return
 
     song = queue.popleft()
-    player = await YTDLSource.from_url(song["query"], loop=bot.loop, stream=True)
+
+    try:
+        player = await YTDLSource.from_url(song["query"], loop=bot.loop, stream=True)
+    except Exception as e:
+        await ctx.send(f"Error while loading track: {e}")
+        print("LOAD ERROR:", e)
+        return
 
     def after_playing(error):
         if error:
-            print(f"Player error: {error}")
+            print(f"PLAYER ERROR: {error}")
 
         fut = asyncio.run_coroutine_threadsafe(play_next(ctx), bot.loop)
         try:
             fut.result()
         except Exception as e:
-            print(f"Next song error: {e}")
+            print(f"NEXT SONG ERROR: {e}")
 
-    ctx.voice_client.play(player, after=after_playing)
-    await ctx.send(f"Now playing: **{player.title}**")
+    try:
+        ctx.voice_client.play(player, after=after_playing)
+        await ctx.send(f"Now playing: **{player.title}**")
+    except Exception as e:
+        await ctx.send(f"Playback failed: {e}")
+        print("PLAYBACK ERROR:", e)
 
 
 # =========================
@@ -143,11 +167,10 @@ async def play(ctx, *, query: str):
     queue = get_queue(ctx.guild.id)
     queue.append({"query": query})
 
-    if ctx.voice_client.is_playing() or ctx.voice_client.is_paused():
-        await ctx.send(f"Added to queue: **{query}**")
-        return
+    await ctx.send(f"Added: **{query}**")
 
-    await play_next(ctx)
+    if not ctx.voice_client.is_playing() and not ctx.voice_client.is_paused():
+        await play_next(ctx)
 
 
 @bot.command()
@@ -185,8 +208,8 @@ async def stop(ctx):
     await ctx.send("Stopped and cleared queue.")
 
 
-@bot.command()
-async def queue(ctx):
+@bot.command(name="queue")
+async def show_queue(ctx):
     q = get_queue(ctx.guild.id)
 
     if not q:
@@ -199,5 +222,29 @@ async def queue(ctx):
 
     await ctx.send("**Queue:**\n" + "\n".join(lines[:20]))
 
+
+@bot.command()
+async def testaudio(ctx):
+    if ctx.author.voice is None:
+        await ctx.send("Join a voice channel first.")
+        return
+
+    if ctx.voice_client is None:
+        await ctx.author.voice.channel.connect()
+
+    url = "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3"
+
+    source = discord.FFmpegPCMAudio(
+        url,
+        before_options="-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
+        options="-vn"
+    )
+
+    ctx.voice_client.play(source)
+    await ctx.send("Testing direct audio stream...")
+
+
+if TOKEN is None:
+    raise ValueError("TOKEN environment variable is missing.")
 
 bot.run(TOKEN)
